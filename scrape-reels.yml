@@ -1,0 +1,63 @@
+name: Scrape Facebook Reels URLs
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_url:
+        description: "Facebook page URL"
+        default: "https://www.facebook.com/profile.php?id=61596271422824"
+      max_scrolls:
+        description: "Max scroll iterations"
+        default: "60"
+  # schedule:
+  #   - cron: "0 */6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FB_STATE: ${{ secrets.FB_STATE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      # Optional: Playwright storage_state JSON saved as repo secret FB_STATE
+      - name: Restore login session (optional)
+        if: ${{ env.FB_STATE != '' }}
+        run: echo "$FB_STATE" > fb_state.json
+
+      - name: Scrape reels
+        env:
+          PAGE_URL: ${{ github.event.inputs.page_url || 'https://www.facebook.com/profile.php?id=61596271422824' }}
+          MAX_SCROLLS: ${{ github.event.inputs.max_scrolls || '60' }}
+        run: python scrape_reels.py
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reels-urls
+          path: |
+            reels_urls.txt
+            reels_urls.json
+            debug.png
+
+      - name: Commit results
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reels_urls.txt reels_urls.json
+          git diff --cached --quiet || (git commit -m "Update reels URLs" && git push)
