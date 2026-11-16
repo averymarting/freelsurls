@@ -1,4 +1,4 @@
-name: Scrape Facebook Reels URLs
+name: Scrape Facebook Reels and Upload to Mega
 
 on:
   workflow_dispatch:
@@ -9,18 +9,17 @@ on:
       max_scrolls:
         description: "Max scroll iterations"
         default: "60"
-  # schedule:
-  #   - cron: "0 */6 * * *"
-
-permissions:
-  contents: write
+      mega_folder:
+        description: "Mega destination folder"
+        default: "FB_Reels"
 
 jobs:
-  scrape:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 120
     env:
       FB_STATE: ${{ secrets.FB_STATE }}
+      MEGA_FOLDER: ${{ github.event.inputs.mega_folder || 'FB_Reels' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,36 +27,46 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Playwright
+      - name: Install dependencies
         run: |
-          pip install playwright
+          pip install playwright yt-dlp
           playwright install --with-deps chromium
+          sudo apt-get install -y ffmpeg
+          curl -fsSL https://rclone.org/install.sh | sudo bash
 
-      # Optional: Playwright storage_state JSON saved as repo secret FB_STATE
+      - name: Configure rclone (from secret)
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+
       - name: Restore login session (optional)
         if: ${{ env.FB_STATE != '' }}
         run: echo "$FB_STATE" > fb_state.json
 
-      - name: Scrape reels
+      - name: Scrape reel URLs
         env:
           PAGE_URL: ${{ github.event.inputs.page_url || 'https://www.facebook.com/profile.php?id=61596271422824' }}
           MAX_SCROLLS: ${{ github.event.inputs.max_scrolls || '60' }}
         run: python scrape_reels.py
 
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: reels-urls
-          path: |
-            reels_urls.txt
-            reels_urls.json
-            debug.png
-
-      - name: Commit results
-        if: success()
+      - name: Download new reels and upload to Mega
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add reels_urls.txt reels_urls.json
-          git diff --cached --quiet || (git commit -m "Update reels URLs" && git push)
+          mkdir -p videos
+          rclone lsf "mega:$MEGA_FOLDER" > existing.txt || true
+          while read -r url; do
+            id=$(basename "$url")
+            if grep -q "^$id\." existing.txt; then
+              echo "Skip $id (already on Mega)"; continue
+            fi
+            echo "Downloading $url"
+            yt-dlp -f "bv*+ba/b" --merge-output-format mp4 \
+              -o "videos/$id.%(ext)s" "$url" \
+              || { echo "Failed: $url"; continue; }
+            sleep 5
+          done < reels_urls.txt
+          ls -lh videos || true
+          if [ -n "$(ls -A videos 2>/dev/null)" ]; then
+            rclone copy videos "mega:$MEGA_FOLDER" --transfers 2 -v
+          else
+            echo "Nothing new to upload"
+          fi
